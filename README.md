@@ -17,14 +17,14 @@ Install the plugin with your favorite package manager:
  - [Vim-plug](https://github.com/junegunn/vim-plug)
 
     ```lua
-    Plug "whitestarrain/md-section-number.nvim"
+    Plug "TheDarkStarJack/md-section-number"
     ```
 
  - [lazy.nvim](https://github.com/folke/lazy.nvim)
 
     ```lua
     {
-        "whitestarrain/md-section-number.nvim",
+        "TheDarkStarJack/md-section-number",
         ft = "markdown",
         config = function()
             require("md_section_number").setup()
@@ -40,6 +40,7 @@ This plugin comes with the following defaults:
 {
     max_level = 4, -- stop to add section number after max_level
     min_level = 1, -- start to add section number after min_level
+    directory_relativenumber = true, -- enable relativenumber for directory buffers
     ignore_pairs = { -- the markdown content in these pairs will be ignored
         { "```", "```" },
         { "\\~\\~\\~", "\\~\\~\\~" },
@@ -50,6 +51,9 @@ This plugin comes with the following defaults:
         position = "right",
         indent_space_number = 2,
         header_prefix = "- ",
+        winopts = {
+            relativenumber = true,
+        },
     },
 }
 ```

@@ -6,6 +6,7 @@ local M = {}
 local DEFAULT_OPTS = {
   max_level = 4,
   min_level = 1,
+  directory_relativenumber = true,
   ignore_pairs = {
     { "```", "```" },
     { "\\~\\~\\~", "\\~\\~\\~" },
@@ -17,8 +18,29 @@ local DEFAULT_OPTS = {
     indent_space_number = 2,
     header_prefix = "- ",
     toc_level = 6,
+    winopts = {
+      relativenumber = true,
+    },
   },
 }
+
+local function setup_directory_relativenumber(enabled)
+  local group = vim.api.nvim_create_augroup("MSNDirectoryRelativenumberGroup", { clear = true })
+  if not enabled then
+    return
+  end
+
+  vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter", "FileType" }, {
+    group = group,
+    callback = function()
+      local filetype = vim.bo.filetype
+      local bufname = vim.api.nvim_buf_get_name(0)
+      if filetype == "netrw" or (bufname ~= "" and vim.fn.isdirectory(bufname) == 1) then
+        vim.opt_local.relativenumber = true
+      end
+    end,
+  })
+end
 
 local function merge_options(conf)
   return vim.tbl_deep_extend("force", DEFAULT_OPTS, conf or {})
@@ -42,6 +64,7 @@ function M.setup(conf)
   parser.setup(opts)
   replacer.setup(opts)
   toc.setup(opts.toc)
+  setup_directory_relativenumber(opts.directory_relativenumber)
 end
 
 local function get_headings(...)

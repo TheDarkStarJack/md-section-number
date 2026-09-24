@@ -10,7 +10,7 @@ M.options = {
   default_display_level = 6,
   winopts = {
     number = false,
-    relativenumber = false,
+    relativenumber = true,
     wrap = false,
     winfixwidth = true,
     list = false,
@@ -27,20 +27,6 @@ function M.setup(opts)
   M.options = vim.tbl_deep_extend("force", M.options, opts or {})
 end
 
-M.viewBind = {
-  MdHeaders = nil,
-  displayLevel = nil,
-  TocWin = nil,
-  TocBuf = nil,
-  BindBuf = nil,
-  BindWin = nil,
-  changeTick = nil,
-
-  -- stat
-  allMdHeaders = nil,
-  maxLevel = nil,
-}
-
 local bindBufGroupName = "MSNbindBufEventGroup"
 local tocBufGroupName = "MSNtocBufEventGroup"
 local globalGroupName = "MSNGlobalEventGroup"
@@ -52,24 +38,71 @@ local move_tbl = {
   right = "L",
 }
 
+M.viewBind = {}
+M.autocmd_setup_done = false
+
+local function current_tabpage_key(tabpage)
+  return tostring(tabpage or vim.api.nvim_get_current_tabpage())
+end
+
+local function create_state(tabpage)
+  local key = current_tabpage_key(tabpage)
+  return {
+    tabpage = key,
+    MdHeaders = nil,
+    displayLevel = nil,
+    TocWin = nil,
+    TocBuf = nil,
+    BindBuf = nil,
+    BindWin = nil,
+    changeTick = nil,
+    allMdHeaders = nil,
+    maxLevel = nil,
+    bindBufGroupName = bindBufGroupName .. "_" .. key,
+    tocBufGroupName = tocBufGroupName .. "_" .. key,
+  }
+end
+
+local function get_state(tabpage)
+  return M.viewBind[current_tabpage_key(tabpage)]
+end
+
+local function ensure_state(tabpage)
+  local key = current_tabpage_key(tabpage)
+  if not M.viewBind[key] then
+    M.viewBind[key] = create_state(tabpage)
+  end
+  return M.viewBind[key]
+end
+
+local function has_valid_win(win)
+  return win ~= nil and vim.api.nvim_win_is_valid(win)
+end
+
 -- local buildInEvent = { }
 
-local function clear_all_autocmd()
+local function clear_all_autocmd(state)
   local check_buf_valid = function(buf_id)
     return buf_id ~= nil and vim.api.nvim_buf_is_valid(buf_id)
   end
-  if check_buf_valid(M.viewBind.BindBuf) then
-    vim.api.nvim_clear_autocmds({ group = bindBufGroupName, buffer = M.viewBind.BindBuf })
+  if not state then
+    return
   end
-  if check_buf_valid(M.viewBind.TocBuf) then
-    vim.api.nvim_clear_autocmds({ group = tocBufGroupName, buffer = M.viewBind.TocBuf })
+  if check_buf_valid(state.BindBuf) then
+    vim.api.nvim_clear_autocmds({ group = state.bindBufGroupName, buffer = state.BindBuf })
   end
-  vim.api.nvim_clear_autocmds({ group = globalGroupName })
+  if check_buf_valid(state.TocBuf) then
+    vim.api.nvim_clear_autocmds({ group = state.tocBufGroupName, buffer = state.TocBuf })
+  end
 end
 
-function M.unbind()
-  clear_all_autocmd()
-  M.viewBind = {}
+function M.unbind(tabpage)
+  local state = get_state(tabpage)
+  if not state then
+    return
+  end
+  clear_all_autocmd(state)
+  M.viewBind[state.tabpage] = nil
 end
 
 local function create_side_window()
@@ -99,85 +132,88 @@ local function add_indent_for_header(header)
   return header_str
 end
 
-local function reload_headers(header_level_offset)
+local function reload_headers(state, header_level_offset)
   local change_flag = false
   header_level_offset = header_level_offset or 0
-  if not M.viewBind.BindBuf then
+  if not state or not state.BindBuf then
     return change_flag
   end
-  local current_change_tick = vim.api.nvim_buf_get_changedtick(M.viewBind.BindBuf)
-  if M.viewBind.allMdHeaders == nil or (M.viewBind.changeTick ~= current_change_tick) then
-    M.viewBind.allMdHeaders = parser.get_heading_lines(vim.api.nvim_buf_get_lines(M.viewBind.BindBuf, 0, -1, false))
+  local current_change_tick = vim.api.nvim_buf_get_changedtick(state.BindBuf)
+  if state.allMdHeaders == nil or (state.changeTick ~= current_change_tick) then
+    state.allMdHeaders = parser.get_heading_lines(vim.api.nvim_buf_get_lines(state.BindBuf, 0, -1, false))
     local max_level = 1
-    for _, header in ipairs(M.viewBind.allMdHeaders) do
+    for _, header in ipairs(state.allMdHeaders) do
       if header[3] > max_level then
         max_level = header[3]
       end
     end
-    M.viewBind.maxLevel = max_level
+    state.maxLevel = max_level
     change_flag = true
   end
-  M.viewBind.changeTick = current_change_tick
+  state.changeTick = current_change_tick
 
   -- display level
-  local currentDisplayLevel = M.viewBind.displayLevel
-  if M.viewBind.displayLevel == nil then
-    M.viewBind.displayLevel = M.viewBind.maxLevel
+  local currentDisplayLevel = state.displayLevel
+  if state.displayLevel == nil then
+    state.displayLevel = state.maxLevel
   end
   if header_level_offset ~= 0 then
-    M.viewBind.displayLevel = math.max(1, math.min(M.viewBind.displayLevel + header_level_offset, M.viewBind.maxLevel))
+    state.displayLevel = math.max(1, math.min(state.displayLevel + header_level_offset, state.maxLevel))
   end
-  if change_flag or currentDisplayLevel == nil or currentDisplayLevel ~= M.viewBind.displayLevel then
+  if change_flag or currentDisplayLevel == nil or currentDisplayLevel ~= state.displayLevel then
     change_flag = true
     local display_header = {}
-    for _, header in ipairs(M.viewBind.allMdHeaders) do
-      if header[3] > M.viewBind.displayLevel then
+    for _, header in ipairs(state.allMdHeaders) do
+      if header[3] > state.displayLevel then
         goto continue
       end
       table.insert(display_header, header)
       ::continue::
     end
-    M.viewBind.MdHeaders = display_header
+    state.MdHeaders = display_header
   end
 
   return change_flag
 end
 
-local function render_headers(header_level_offset)
+local function render_headers(state, header_level_offset)
   -- get change flag, update headers
-  local change_flag = reload_headers(header_level_offset)
+  local change_flag = reload_headers(state, header_level_offset)
   if not change_flag then
     return
   end
   -- start update
-  vim.api.nvim_buf_set_option(M.viewBind.TocBuf, "modifiable", true)
+  if not state or not has_valid_win(state.TocWin) or not vim.api.nvim_buf_is_valid(state.TocBuf) then
+    return
+  end
+  vim.api.nvim_buf_set_option(state.TocBuf, "modifiable", true)
   local all_headers_with_indent = {}
-  for _, header in ipairs(M.viewBind.MdHeaders) do
+  for _, header in ipairs(state.MdHeaders or {}) do
     table.insert(all_headers_with_indent, add_indent_for_header(header))
   end
   -- clear
-  vim.api.nvim_buf_set_lines(M.viewBind.TocBuf, 0, -1, false, {})
+  vim.api.nvim_buf_set_lines(state.TocBuf, 0, -1, false, {})
   -- reset
-  vim.api.nvim_buf_set_lines(M.viewBind.TocBuf, 0, -1, false, all_headers_with_indent)
-  vim.api.nvim_buf_set_option(M.viewBind.TocBuf, "modifiable", false)
+  vim.api.nvim_buf_set_lines(state.TocBuf, 0, -1, false, all_headers_with_indent)
+  vim.api.nvim_buf_set_option(state.TocBuf, "modifiable", false)
 end
 
-local function get_toc_index(lineNumber)
-  if not M.viewBind.MdHeaders or #M.viewBind.MdHeaders == 0 then
+local function get_toc_index(state, lineNumber)
+  if not state or not state.MdHeaders or #state.MdHeaders == 0 then
     return 1
   end
-  lineNumber = lineNumber or vim.api.nvim_win_get_cursor(M.viewBind.BindWin)[1]
+  lineNumber = lineNumber or vim.api.nvim_win_get_cursor(state.BindWin)[1]
   local left = 1
-  local right = #M.viewBind.MdHeaders
-  if lineNumber < M.viewBind.MdHeaders[left][1] then
+  local right = #state.MdHeaders
+  if lineNumber < state.MdHeaders[left][1] then
     return left
   end
-  if lineNumber > M.viewBind.MdHeaders[right][1] then
+  if lineNumber > state.MdHeaders[right][1] then
     return right
   end
   while left <= right do
     local middle = math.floor((left + right) / 2)
-    local middleVal = M.viewBind.MdHeaders[middle][1] + 1
+    local middleVal = state.MdHeaders[middle][1] + 1
     if middleVal == lineNumber then
       return middle
     elseif lineNumber > middleVal then
@@ -189,44 +225,58 @@ local function get_toc_index(lineNumber)
   return math.max(math.min(left, right), 1)
 end
 
-local function set_toc_position(contentLinenumber)
-  local index = get_toc_index(contentLinenumber)
-  vim.api.nvim_win_set_cursor(M.viewBind.TocWin, { index, 0 })
-  vim.api.nvim_buf_clear_namespace(M.viewBind.TocBuf, tocHlNameSpace, 0, -1)
-  vim.api.nvim_buf_add_highlight(M.viewBind.TocBuf, tocHlNameSpace, "Search", index - 1, 0, -1)
+local function set_toc_position(state, contentLinenumber)
+  if not state or not has_valid_win(state.TocWin) or not vim.api.nvim_buf_is_valid(state.TocBuf) then
+    return
+  end
+  local index = get_toc_index(state, contentLinenumber)
+  vim.api.nvim_win_set_cursor(state.TocWin, { index, 0 })
+  vim.api.nvim_buf_clear_namespace(state.TocBuf, tocHlNameSpace, 0, -1)
+  vim.api.nvim_buf_add_highlight(state.TocBuf, tocHlNameSpace, "Search", index - 1, 0, -1)
 end
 
 local function jump_header()
-  if not M.viewBind.MdHeaders then
-    reload_headers()
+  local state = get_state()
+  if not state then
+    return
   end
-  local header_index = math.min(vim.api.nvim_win_get_cursor(0)[1], #M.viewBind.MdHeaders)
+  if not state.MdHeaders then
+    reload_headers(state)
+  end
+  if not state.MdHeaders or #state.MdHeaders == 0 then
+    return
+  end
+  local header_index = math.min(vim.api.nvim_win_get_cursor(0)[1], #state.MdHeaders)
   local line_number =
-    math.min(M.viewBind.MdHeaders[header_index][1] + 1, vim.api.nvim_buf_line_count(M.viewBind.BindBuf))
-  vim.api.nvim_win_set_buf(M.viewBind.BindWin, M.viewBind.BindBuf)
-  vim.api.nvim_set_current_win(M.viewBind.BindWin)
-  vim.api.nvim_win_set_cursor(M.viewBind.BindWin, { line_number, 0 })
+    math.min(state.MdHeaders[header_index][1] + 1, vim.api.nvim_buf_line_count(state.BindBuf))
+  vim.api.nvim_win_set_buf(state.BindWin, state.BindBuf)
+  vim.api.nvim_set_current_win(state.BindWin)
+  vim.api.nvim_win_set_cursor(state.BindWin, { line_number, 0 })
   vim.api.nvim_feedkeys("zz", "n", false)
-  set_toc_position()
+  set_toc_position(state)
   -- add to jump list
   vim.cmd("normal! m'")
 end
 
 function M.closeToc()
-  if not M.viewBind.TocWin then
+  local state = get_state()
+  if not state or not has_valid_win(state.TocWin) then
     return
   end
-  vim.api.nvim_win_close(M.viewBind.TocWin, true)
-  M.unbind()
+  vim.api.nvim_win_close(state.TocWin, true)
+  M.unbind(state.tabpage)
 end
 
-local function set_mappings()
+local function set_mappings(state)
   local function change_display_level(levelOffset)
     return function()
-      local header_index = vim.api.nvim_win_get_cursor(M.viewBind.TocWin)[1]
-      local content_linenumber = M.viewBind.MdHeaders[header_index][1] + 1
-      render_headers(levelOffset)
-      set_toc_position(content_linenumber)
+      if not state or not state.MdHeaders then
+        return
+      end
+      local header_index = vim.api.nvim_win_get_cursor(state.TocWin)[1]
+      local content_linenumber = state.MdHeaders[header_index][1] + 1
+      render_headers(state, levelOffset)
+      set_toc_position(state, content_linenumber)
       vim.api.nvim_feedkeys("zz", "n", false)
     end
   end
@@ -236,21 +286,24 @@ local function set_mappings()
       M.closeToc()
     end,
     r = function()
-      local origin_position = vim.api.nvim_win_get_cursor(M.viewBind.TocWin)
-      render_headers()
-      local line_count = vim.api.nvim_buf_line_count(M.viewBind.TocBuf)
+      if not state then
+        return
+      end
+      local origin_position = vim.api.nvim_win_get_cursor(state.TocWin)
+      render_headers(state)
+      local line_count = vim.api.nvim_buf_line_count(state.TocBuf)
       if line_count == 0 then
         return
       end
-      local row = get_toc_index()
-      local line = vim.api.nvim_buf_get_lines(M.viewBind.TocBuf, row - 1, row, false)[1]
+      local row = get_toc_index(state)
+      local line = vim.api.nvim_buf_get_lines(state.TocBuf, row - 1, row, false)[1]
       if line == nil then
         line = ""
       end
       local col = math.min(#line, origin_position[2])
-      vim.api.nvim_win_set_cursor(M.viewBind.TocWin, { row, col })
-      vim.api.nvim_buf_clear_namespace(M.viewBind.TocBuf, tocHlNameSpace, 0, -1)
-      vim.api.nvim_buf_add_highlight(M.viewBind.TocBuf, tocHlNameSpace, "Search", row - 1, 0, -1)
+      vim.api.nvim_win_set_cursor(state.TocWin, { row, col })
+      vim.api.nvim_buf_clear_namespace(state.TocBuf, tocHlNameSpace, 0, -1)
+      vim.api.nvim_buf_add_highlight(state.TocBuf, tocHlNameSpace, "Search", row - 1, 0, -1)
     end,
     ["h"] = change_display_level(-1),
     ["l"] = change_display_level(1),
@@ -258,164 +311,224 @@ local function set_mappings()
     ["E"] = change_display_level(5),
   }
   for k, v in pairs(mappings) do
-    vim.keymap.set("n", k, v, { buffer = M.viewBind.TocBuf, silent = true, noremap = true })
+    vim.keymap.set("n", k, v, { buffer = state.TocBuf, silent = true, noremap = true })
   end
 end
 
-local function set_bind_buf_autocmd()
-  local bindBufEventGroup = vim.api.nvim_create_augroup(bindBufGroupName, { clear = true })
+local function set_bind_buf_autocmd(state)
+  if not state then
+    return
+  end
+  local bindBufEventGroup = vim.api.nvim_create_augroup(state.bindBufGroupName, { clear = true })
   vim.api.nvim_create_autocmd({ "BufWritePost" }, {
     group = bindBufEventGroup,
-    buffer = M.viewBind.BindBuf,
-    callback = vim.schedule_wrap(function()
-      render_headers()
-      set_toc_position()
-    end),
+    buffer = state.BindBuf,
+    callback = function()
+      local tabpage = state.tabpage
+      vim.schedule(function()
+        local current_state = get_state(tabpage)
+        if not current_state then
+          return
+        end
+        render_headers(current_state)
+        set_toc_position(current_state)
+      end)
+    end,
   })
   vim.api.nvim_create_autocmd("CursorHold", {
     group = bindBufEventGroup,
-    buffer = M.viewBind.BindBuf,
-    callback = vim.schedule_wrap(function()
-      set_toc_position()
-    end),
+    buffer = state.BindBuf,
+    callback = function()
+      local tabpage = state.tabpage
+      vim.schedule(function()
+        local current_state = get_state(tabpage)
+        if not current_state then
+          return
+        end
+        set_toc_position(current_state)
+      end)
+    end,
   })
   vim.api.nvim_create_autocmd("WinClosed", {
     group = bindBufEventGroup,
-    buffer = M.viewBind.BindBuf,
-    callback = vim.schedule_wrap(function()
-      if vim.api.nvim_get_current_win() == M.viewBind.TocWin then
-        return
-      end
-      M.closeToc()
-    end),
+    buffer = state.BindBuf,
+    callback = function()
+      local tabpage = state.tabpage
+      vim.schedule(function()
+        local current_state = get_state(tabpage)
+        if not current_state then
+          return
+        end
+        if vim.api.nvim_get_current_win() == current_state.TocWin then
+          return
+        end
+        M.closeToc()
+      end)
+    end,
   })
 end
 
-local function set_toc_buf_autocmd()
-  local tocBufEventGroup = vim.api.nvim_create_augroup(tocBufGroupName, { clear = true })
+local function set_toc_buf_autocmd(state)
+  if not state then
+    return
+  end
+  local tocBufEventGroup = vim.api.nvim_create_augroup(state.tocBufGroupName, { clear = true })
   vim.api.nvim_create_autocmd({ "WinClosed", "QuitPre" }, {
     group = tocBufEventGroup,
-    buffer = M.viewBind.TocBuf,
+    buffer = state.TocBuf,
     callback = function()
-      M.unbind()
+      M.unbind(state.tabpage)
     end,
   })
   vim.api.nvim_create_autocmd("BufEnter", {
     group = tocBufEventGroup,
-    buffer = M.viewBind.TocBuf,
-    callback = vim.schedule_wrap(function()
-      if M.viewBind.BindWin == nil or not vim.api.nvim_win_is_valid(M.viewBind.BindWin) then
-        M.unbind()
-        return
-      end
+    buffer = state.TocBuf,
+    callback = function()
+      local tabpage = state.tabpage
+      vim.schedule(function()
+        local current_state = get_state(tabpage)
+        if not current_state then
+          return
+        end
+        if current_state.BindWin == nil or not vim.api.nvim_win_is_valid(current_state.BindWin) then
+          M.unbind(tabpage)
+          return
+        end
 
-      local currentBuf = vim.api.nvim_win_get_buf(M.viewBind.BindWin)
-      if currentBuf ~= M.viewBind.BindBuf then
-        return
-      end
-      render_headers()
-      set_toc_position()
-    end),
+        local currentBuf = vim.api.nvim_win_get_buf(current_state.BindWin)
+        if currentBuf ~= current_state.BindBuf then
+          return
+        end
+        render_headers(current_state)
+        set_toc_position(current_state)
+      end)
+    end,
   })
 end
 
-local function switch_bind()
+local function switch_bind(state, bind_buf, bind_win)
   -- no toc
-  if not M.viewBind.TocBuf then
+  if not state or not state.TocBuf then
     return
   end
   -- filetype judgment
-  local filetype = vim.api.nvim_buf_get_option(0, "filetype")
+  local filetype = vim.api.nvim_buf_get_option(bind_buf, "filetype")
   if not markdownFileType[filetype] then
     return
   end
-  local bind_buf = vim.api.nvim_get_current_buf()
-  local bind_win = vim.api.nvim_get_current_win()
-  if bind_buf == M.viewBind.BindBuf and bind_win == M.viewBind.BindWin then
+  if bind_buf == state.BindBuf and bind_win == state.BindWin then
     return
   end
-  if bind_buf ~= M.viewBind.BindBuf then
-    M.viewBind.BindBuf = bind_buf
-    M.viewBind.allMdHeaders = nil
-    M.viewBind.displayLevel = nil
-    render_headers()
+  if bind_buf ~= state.BindBuf then
+    state.BindBuf = bind_buf
+    state.allMdHeaders = nil
+    state.displayLevel = nil
+    render_headers(state)
   end
-  if bind_buf ~= M.viewBind.BindWin then
-    M.viewBind.BindWin = bind_win
+  if bind_win ~= state.BindWin then
+    state.BindWin = bind_win
   end
-  set_bind_buf_autocmd()
-  set_toc_position()
+  set_bind_buf_autocmd(state)
+  set_toc_position(state)
 end
 
 local function set_autocmd()
-  -- toc buf autocmd
-  set_toc_buf_autocmd()
-  -- bind buf autocmd
-  set_bind_buf_autocmd()
-  -- global autocmd
+  if M.autocmd_setup_done then
+    return
+  end
 
   local globalEventGroup = vim.api.nvim_create_augroup(globalGroupName, { clear = true })
   vim.api.nvim_create_autocmd("BufEnter", {
     group = globalEventGroup,
-    pattern = "*.md,*.markdown",
-    callback = vim.schedule_wrap(switch_bind),
+    pattern = { "*.md", "*.markdown" },
+    callback = function()
+      local tabpage = vim.api.nvim_get_current_tabpage()
+      local bind_buf = vim.api.nvim_get_current_buf()
+      local bind_win = vim.api.nvim_get_current_win()
+      vim.schedule(function()
+        local state = get_state(tabpage)
+        if not state then
+          return
+        end
+        switch_bind(state, bind_buf, bind_win)
+      end)
+    end,
   })
   vim.api.nvim_create_autocmd("WinEnter", {
     group = globalEventGroup,
-    pattern = "*.md,*.markdown",
-    callback = vim.schedule_wrap(function()
-      local currentBuf = vim.api.nvim_win_get_buf(0)
-      if currentBuf == M.viewBind.BindBuf then
-        M.viewBind.BindWin = vim.api.nvim_get_current_win()
-        return
-      end
-    end),
+    pattern = { "*.md", "*.markdown" },
+    callback = function()
+      local tabpage = vim.api.nvim_get_current_tabpage()
+      local bind_buf = vim.api.nvim_get_current_buf()
+      local bind_win = vim.api.nvim_get_current_win()
+      vim.schedule(function()
+        local current_state = get_state(tabpage)
+        if not current_state then
+          return
+        end
+        if bind_buf == current_state.BindBuf then
+          current_state.BindWin = bind_win
+        end
+      end)
+    end,
   })
   vim.api.nvim_create_autocmd("QuitPre", {
     group = globalEventGroup,
-    pattern = "*.md,*.markdown",
-    callback = vim.schedule_wrap(function()
-      local wins = vim.api.nvim_tabpage_list_wins(vim.api.nvim_get_current_tabpage())
-      local non_essential_window_flag = #wins == 1 and wins[1] == M.viewBind.TocWin
+    pattern = { "*.md", "*.markdown" },
+    callback = function()
+      local tabpage = vim.api.nvim_get_current_tabpage()
+      vim.schedule(function()
+        local current_state = get_state(tabpage)
+        if not current_state then
+          return
+        end
+        local wins = vim.api.nvim_tabpage_list_wins(tabpage)
+        local non_essential_window_flag = #wins == 1 and wins[1] == current_state.TocWin
 
-      -- support for some session function(like vim-startify)
-      if non_essential_window_flag then
-        local current_buf = M.viewBind.BindBuf
-        local toc_win = M.viewBind.TocWin
-        M.unbind()
-        vim.api.nvim_set_current_buf(current_buf)
-        vim.cmd(":quit")
-      end
-    end),
+        -- support for some session function(like vim-startify)
+        if non_essential_window_flag then
+          local current_buf = current_state.BindBuf
+          M.unbind(tabpage)
+          vim.api.nvim_set_current_buf(current_buf)
+          vim.cmd(":quit")
+        end
+      end)
+    end,
   })
+  M.autocmd_setup_done = true
 end
 
-local function focus_origin_position()
-  if not M.viewBind.BindWin then
+local function focus_origin_position(state)
+  if not state or not has_valid_win(state.BindWin) then
     return
   end
-  vim.api.nvim_set_current_win(M.viewBind.BindWin)
+  vim.api.nvim_set_current_win(state.BindWin)
 end
 
 function M.openToc()
-  if M.viewBind.TocWin then
+  local tabpage = vim.api.nvim_get_current_tabpage()
+  local state = ensure_state(tabpage)
+  if has_valid_win(state.TocWin) then
     return
   end
-  M.viewBind.BindBuf = vim.api.nvim_get_current_buf()
-  M.viewBind.BindWin = vim.api.nvim_get_current_win()
+  state.BindBuf = vim.api.nvim_get_current_buf()
+  state.BindWin = vim.api.nvim_get_current_win()
 
   local win, buf = create_side_window()
-  M.viewBind.TocWin = win
-  M.viewBind.TocBuf = buf
+  state.TocWin = win
+  state.TocBuf = buf
 
-  render_headers()
-  set_mappings()
+  render_headers(state)
+  set_mappings(state)
   set_autocmd()
-  focus_origin_position()
+  set_toc_buf_autocmd(state)
+  set_bind_buf_autocmd(state)
+  focus_origin_position(state)
 end
 
 function M.toggle()
-  if M.viewBind.TocWin then
+  local state = get_state()
+  if state and has_valid_win(state.TocWin) then
     M.closeToc()
   else
     M.openToc()
