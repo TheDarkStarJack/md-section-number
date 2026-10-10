@@ -8,6 +8,7 @@ M.options = {
   indent_space_number = 2,
   header_prefix = "- ",
   default_display_level = 6,
+  start_folded = false,
   winopts = {
     number = false,
     relativenumber = true,
@@ -241,6 +242,32 @@ local function render_headers(state, header_level_offset, force)
   vim.api.nvim_buf_set_option(state.TocBuf, "modifiable", false)
 end
 
+-- collapse every heading at the shallowest level: only top-level headings stay visible
+local function collapse_top_level_headers(state)
+  state.collapsed = {}
+  local min_level = math.huge
+  for _, h in ipairs(state.allMdHeaders or {}) do
+    if h[3] < min_level then
+      min_level = h[3]
+    end
+  end
+  for _, h in ipairs(state.allMdHeaders or {}) do
+    if h[3] == min_level then
+      state.collapsed[h[4]] = true
+    end
+  end
+end
+
+-- fresh fold state for a (re)bound buffer, honoring the start_folded option
+local function reset_fold_state(state)
+  state.collapsed = {}
+  if M.options.start_folded then
+    reload_headers(state)
+    collapse_top_level_headers(state)
+  end
+  state.foldVersion = (state.foldVersion or 0) + 1
+end
+
 local function get_toc_index(state, lineNumber)
   if not state or not state.MdHeaders or #state.MdHeaders == 0 then
     return 1
@@ -367,18 +394,7 @@ local function set_mappings(state)
       if action == "open_all" then
         state.collapsed = {}
       elseif action == "close_all" then
-        state.collapsed = {}
-        local min_level = math.huge
-        for _, h in ipairs(state.allMdHeaders or {}) do
-          if h[3] < min_level then
-            min_level = h[3]
-          end
-        end
-        for _, h in ipairs(state.allMdHeaders or {}) do
-          if h[3] == min_level then
-            state.collapsed[h[4]] = true
-          end
-        end
+        collapse_top_level_headers(state)
       elseif action == "close" or (action == "toggle" and not state.collapsed[path]) then
         state.collapsed[path] = true
       elseif action == "open" or (action == "toggle" and state.collapsed[path]) then
@@ -565,8 +581,7 @@ local function switch_bind(state, bind_buf, bind_win)
     state.BindBuf = bind_buf
     state.allMdHeaders = nil
     state.displayLevel = nil
-    state.collapsed = {}
-    state.foldVersion = (state.foldVersion or 0) + 1
+    reset_fold_state(state)
     render_headers(state)
   end
   if bind_win ~= state.BindWin then
@@ -662,6 +677,7 @@ function M.openToc()
   state.TocWin = win
   state.TocBuf = buf
 
+  reset_fold_state(state)
   render_headers(state)
   set_mappings(state)
   set_autocmd()

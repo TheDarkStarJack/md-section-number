@@ -18,6 +18,7 @@ local DEFAULT_OPTS = {
     indent_space_number = 2,
     header_prefix = "- ",
     toc_level = 6,
+    start_folded = false, -- collapse all headings when opening the toc
     winopts = {
       relativenumber = true,
     },

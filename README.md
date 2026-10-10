@@ -51,6 +51,7 @@ This plugin comes with the following defaults:
         position = "right",
         indent_space_number = 2,
         header_prefix = "- ",
+        start_folded = false, -- true: open the toc with all headings collapsed
         winopts = {
             relativenumber = true,
         },
