@@ -79,4 +79,10 @@ This plugin comes with the following defaults:
       * `l` - increase header's max display level.
       * `W` - Collapse all.
       * `E` - Expand all.
+    * fold a single section (per heading, works like fold keys)
+      * `zo` - expand the children of the heading under cursor (one level at a time).
+      * `zc` - collapse the heading under cursor (hide its whole subtree).
+      * `za` - toggle collapse/expand of the heading under cursor.
+      * `zR` - expand all headings.
+      * `zM` - collapse all headings (only top-level headings remain).
 

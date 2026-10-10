@@ -51,6 +51,9 @@ local function create_state(tabpage)
     tabpage = key,
     MdHeaders = nil,
     displayLevel = nil,
+    collapsed = {},
+    foldVersion = 0,
+    lastFoldVersion = 0,
     TocWin = nil,
     TocBuf = nil,
     BindBuf = nil,
@@ -132,6 +135,34 @@ local function add_indent_for_header(header)
   return header_str
 end
 
+-- assign each header a stable ordinal path, e.g. the 3rd H2 under the 1st H1 is "1.3"
+local function compute_header_paths(headers)
+  local counters = {}
+  for _, header in ipairs(headers) do
+    local level = header[3]
+    counters[level] = (counters[level] or 0) + 1
+    for k = #counters, level + 1, -1 do
+      counters[k] = nil
+    end
+    local parts = {}
+    for k = 1, level do
+      parts[k] = tostring(counters[k] or 1)
+    end
+    header[4] = table.concat(parts, ".")
+  end
+end
+
+local function has_collapsed_ancestor(collapsed, path)
+  local dot = path:find(".", 1, true)
+  while dot ~= nil do
+    if collapsed[path:sub(1, dot - 1)] then
+      return true
+    end
+    dot = path:find(".", dot + 1, true)
+  end
+  return false
+end
+
 local function reload_headers(state, header_level_offset)
   local change_flag = false
   header_level_offset = header_level_offset or 0
@@ -141,6 +172,7 @@ local function reload_headers(state, header_level_offset)
   local current_change_tick = vim.api.nvim_buf_get_changedtick(state.BindBuf)
   if state.allMdHeaders == nil or (state.changeTick ~= current_change_tick) then
     state.allMdHeaders = parser.get_heading_lines(vim.api.nvim_buf_get_lines(state.BindBuf, 0, -1, false))
+    compute_header_paths(state.allMdHeaders)
     local max_level = 1
     for _, header in ipairs(state.allMdHeaders) do
       if header[3] > max_level then
@@ -160,11 +192,22 @@ local function reload_headers(state, header_level_offset)
   if header_level_offset ~= 0 then
     state.displayLevel = math.max(1, math.min(state.displayLevel + header_level_offset, state.maxLevel))
   end
+
+  -- per-node fold state
+  state.foldVersion = state.foldVersion or 0
+  if state.lastFoldVersion ~= state.foldVersion then
+    change_flag = true
+    state.lastFoldVersion = state.foldVersion
+  end
   if change_flag or currentDisplayLevel == nil or currentDisplayLevel ~= state.displayLevel then
     change_flag = true
+    local collapsed = state.collapsed or {}
     local display_header = {}
     for _, header in ipairs(state.allMdHeaders) do
       if header[3] > state.displayLevel then
+        goto continue
+      end
+      if has_collapsed_ancestor(collapsed, header[4]) then
         goto continue
       end
       table.insert(display_header, header)
@@ -176,9 +219,9 @@ local function reload_headers(state, header_level_offset)
   return change_flag
 end
 
-local function render_headers(state, header_level_offset)
+local function render_headers(state, header_level_offset, force)
   -- get change flag, update headers
-  local change_flag = reload_headers(state, header_level_offset)
+  local change_flag = force or reload_headers(state, header_level_offset)
   if not change_flag then
     return
   end
@@ -230,6 +273,10 @@ local function set_toc_position(state, contentLinenumber)
     return
   end
   local index = get_toc_index(state, contentLinenumber)
+  local line_count = vim.api.nvim_buf_line_count(state.TocBuf)
+  if line_count > 0 then
+    index = math.min(index, line_count)
+  end
   vim.api.nvim_win_set_cursor(state.TocWin, { index, 0 })
   vim.api.nvim_buf_clear_namespace(state.TocBuf, tocHlNameSpace, 0, -1)
   vim.api.nvim_buf_add_highlight(state.TocBuf, tocHlNameSpace, "Search", index - 1, 0, -1)
@@ -240,13 +287,37 @@ local function jump_header()
   if not state then
     return
   end
-  if not state.MdHeaders then
-    reload_headers(state)
+  -- pin the target heading before any re-render: clearing the toc buffer
+  -- inside render_headers clamps the toc cursor to row 1
+  local pinned_path = nil
+  local content_linenumber = nil
+  if state.MdHeaders and #state.MdHeaders > 0 then
+    local cursor_index = math.min(vim.api.nvim_win_get_cursor(0)[1], #state.MdHeaders)
+    pinned_path = state.MdHeaders[cursor_index][4]
+    content_linenumber = state.MdHeaders[cursor_index][1] + 1
+  end
+  -- headers may be stale if the markdown buffer changed since the last render
+  local changed = reload_headers(state)
+  if changed then
+    render_headers(state, 0, true)
   end
   if not state.MdHeaders or #state.MdHeaders == 0 then
     return
   end
-  local header_index = math.min(vim.api.nvim_win_get_cursor(0)[1], #state.MdHeaders)
+  -- locate the same heading in the refreshed list by its ordinal path
+  local header_index = nil
+  if pinned_path then
+    for index, header in ipairs(state.MdHeaders) do
+      if header[4] == pinned_path then
+        header_index = index
+        break
+      end
+    end
+  end
+  if not header_index then
+    header_index = content_linenumber and get_toc_index(state, content_linenumber) or 1
+  end
+  header_index = math.min(header_index, #state.MdHeaders)
   local line_number =
     math.min(state.MdHeaders[header_index][1] + 1, vim.api.nvim_buf_line_count(state.BindBuf))
   vim.api.nvim_win_set_buf(state.BindWin, state.BindBuf)
@@ -280,6 +351,55 @@ local function set_mappings(state)
       vim.api.nvim_feedkeys("zz", "n", false)
     end
   end
+  local function change_fold_state(action)
+    return function()
+      if not state or not state.MdHeaders or #state.MdHeaders == 0 then
+        return
+      end
+      reload_headers(state)
+      local header_index = math.min(vim.api.nvim_win_get_cursor(state.TocWin)[1], #state.MdHeaders)
+      local header = state.MdHeaders[header_index]
+      if not header then
+        return
+      end
+      local content_linenumber = header[1] + 1
+      local path = header[4]
+      if action == "open_all" then
+        state.collapsed = {}
+      elseif action == "close_all" then
+        state.collapsed = {}
+        local min_level = math.huge
+        for _, h in ipairs(state.allMdHeaders or {}) do
+          if h[3] < min_level then
+            min_level = h[3]
+          end
+        end
+        for _, h in ipairs(state.allMdHeaders or {}) do
+          if h[3] == min_level then
+            state.collapsed[h[4]] = true
+          end
+        end
+      elseif action == "close" or (action == "toggle" and not state.collapsed[path]) then
+        state.collapsed[path] = true
+      elseif action == "open" or (action == "toggle" and state.collapsed[path]) then
+        state.collapsed[path] = nil
+        -- reveal only the next level: children show up, deeper levels stay folded
+        local prefix = path .. "."
+        for _, h in ipairs(state.allMdHeaders or {}) do
+          local child_path = h[4]
+          if child_path:sub(1, #prefix) == prefix and not child_path:sub(#prefix + 1):find(".", 1, true) then
+            state.collapsed[child_path] = true
+          end
+        end
+      else
+        return
+      end
+      state.foldVersion = (state.foldVersion or 0) + 1
+      render_headers(state)
+      set_toc_position(state, content_linenumber)
+      vim.api.nvim_feedkeys("zz", "n", false)
+    end
+  end
   local mappings = {
     ["<cr>"] = jump_header,
     q = function()
@@ -309,6 +429,11 @@ local function set_mappings(state)
     ["l"] = change_display_level(1),
     ["W"] = change_display_level(-5),
     ["E"] = change_display_level(5),
+    ["zo"] = change_fold_state("open"),
+    ["zc"] = change_fold_state("close"),
+    ["za"] = change_fold_state("toggle"),
+    ["zR"] = change_fold_state("open_all"),
+    ["zM"] = change_fold_state("close_all"),
   }
   for k, v in pairs(mappings) do
     vim.keymap.set("n", k, v, { buffer = state.TocBuf, silent = true, noremap = true })
@@ -404,6 +529,23 @@ local function set_toc_buf_autocmd(state)
       end)
     end,
   })
+  -- keep the highlight on the cursor line so it always marks the jump target
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = tocBufEventGroup,
+    buffer = state.TocBuf,
+    callback = function()
+      local current_state = get_state(state.tabpage)
+      if not current_state or not has_valid_win(current_state.TocWin) then
+        return
+      end
+      if not vim.api.nvim_buf_is_valid(current_state.TocBuf) then
+        return
+      end
+      local row = vim.api.nvim_win_get_cursor(current_state.TocWin)[1]
+      vim.api.nvim_buf_clear_namespace(current_state.TocBuf, tocHlNameSpace, 0, -1)
+      vim.api.nvim_buf_add_highlight(current_state.TocBuf, tocHlNameSpace, "Search", row - 1, 0, -1)
+    end,
+  })
 end
 
 local function switch_bind(state, bind_buf, bind_win)
@@ -423,6 +565,8 @@ local function switch_bind(state, bind_buf, bind_win)
     state.BindBuf = bind_buf
     state.allMdHeaders = nil
     state.displayLevel = nil
+    state.collapsed = {}
+    state.foldVersion = (state.foldVersion or 0) + 1
     render_headers(state)
   end
   if bind_win ~= state.BindWin then
